@@ -1,3 +1,7 @@
+
+# PHASE 2 & 3: DATA UNDERSTANDING + DATA CLEANING
+
+# ── CELL 1: Imports ──────────────────────────────────────────
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,7 +14,7 @@ sns.set_palette("husl")
 
 print("Libraries loaded successfully")
 
-                                                                
+# ── CELL 2: Load Data ─────────────────────────────────────────
 train = pd.read_csv("data/raw/Train.csv")
 test  = pd.read_csv("data/raw/Test.csv")
 
@@ -21,22 +25,32 @@ print(f"Train shape : {train.shape}")
 print(f"Test shape  : {test.shape}")
 train.head()
 
-                                                                
-
-   
+# ── CELL 3: Dataset Overview ──────────────────────────────────
+"""
+FEATURE EXPLANATIONS
+────────────────────
+date         : Calendar date (daily frequency, 2013-01-01 to 2017-01-01)
+meantemp     : Mean daily temperature in °C  ← TARGET VARIABLE
+humidity     : Mean daily relative humidity (%)
+               Higher = more moisture in air → feels hotter / promotes rain
+wind_speed   : Mean daily wind speed (km/h)
+               Affects "feels-like" temperature and evaporation
+meanpressure : Mean sea-level atmospheric pressure (hPa / mbar)
+               Low pressure = unstable weather; High = clear skies
+"""
 print(train.dtypes)
 print("\nBasic stats:")
 train.describe()
 
-                                                                 
+# ── CELL 4: Missing Values ─────────────────────────────────────
 print("=== MISSING VALUES ===")
 print(train.isnull().sum())
 print(f"\nTotal missing: {train.isnull().sum().sum()}")
 
-                                                                  
+# ── CELL 5: Duplicate Check ─────────────────────────────────────
 print(f"Duplicate rows: {train.duplicated().sum()}")
 
-                                                                
+# ── CELL 6: Target Variable Distribution ──────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(14, 4))
 
 axes[0].hist(train['meantemp'], bins=40, color='steelblue', edgecolor='white')
@@ -44,7 +58,7 @@ axes[0].set_title('Distribution of Mean Temperature (°C)', fontsize=13)
 axes[0].set_xlabel('Temperature (°C)')
 axes[0].set_ylabel('Count')
 
-             
+# Time series
 axes[1].plot(train['date'], train['meantemp'], color='steelblue', alpha=0.8, linewidth=0.8)
 axes[1].set_title('Mean Temperature Over Time', fontsize=13)
 axes[1].set_xlabel('Date')
@@ -54,7 +68,7 @@ plt.tight_layout()
 plt.savefig("reports/eda_temperature.png", dpi=150, bbox_inches='tight')
 plt.show()
 
-                                                                
+# ── CELL 7: Correlation Heatmap ───────────────────────────────
 numeric_cols = ['meantemp', 'humidity', 'wind_speed', 'meanpressure']
 corr = train[numeric_cols].corr()
 
@@ -66,9 +80,13 @@ plt.tight_layout()
 plt.savefig("reports/eda_correlation.png", dpi=150, bbox_inches='tight')
 plt.show()
 
-   
+"""
+KEY INSIGHT: humidity is negatively correlated with temperature (-0.43),
+meaning hotter days tend to have lower relative humidity.
+meanpressure has a slight negative correlation too.
+"""
 
-                                                                 
+# ── CELL 8: Seasonal Pattern ───────────────────────────────────
 train['month'] = train['date'].dt.month
 monthly = train.groupby('month')['meantemp'].mean()
 
@@ -77,13 +95,13 @@ monthly.plot(kind='bar', color='steelblue', edgecolor='white')
 plt.title('Average Monthly Temperature (Delhi, 2013–2017)', fontsize=13)
 plt.xlabel('Month')
 plt.ylabel('Avg Temperature (°C)')
-plt.xticks(range(12), ['Jan','Feb','Mar','Apr','May','Jun','Jul',
-                             'Aug','Sep','Oct','Nov','Dec'], rotation=0)
+plt.xticks(range(12), ['Jan','Feb','Mar','Apr','May','Jun',
+                        'Jul','Aug','Sep','Oct','Nov','Dec'], rotation=0)
 plt.tight_layout()
 plt.savefig("reports/eda_monthly.png", dpi=150, bbox_inches='tight')
 plt.show()
 
-                                                                
+# ── CELL 9: Outlier Detection (IQR Method) ────────────────────
 print("=== OUTLIER DETECTION ===")
 features = ['meantemp', 'humidity', 'wind_speed', 'meanpressure']
 
@@ -97,9 +115,9 @@ for col in features:
     print(f"{col:15s} | Q1={Q1:8.2f} Q3={Q3:8.2f} | "
           f"Range=[{lower:.2f}, {upper:.2f}] | Outliers={len(outliers)}")
 
-                                                                       
+# meanpressure has extreme outliers (max=7679!) – clearly sensor errors
 
-                                                                
+# ── CELL 10: Visualise Outliers (Boxplot) ─────────────────────
 fig, axes = plt.subplots(1, 4, figsize=(16, 4))
 for ax, col in zip(axes, features):
     ax.boxplot(train[col].dropna(), vert=True, patch_artist=True,
@@ -110,14 +128,21 @@ plt.tight_layout()
 plt.savefig("reports/eda_boxplots.png", dpi=150, bbox_inches='tight')
 plt.show()
 
-                                                                 
-
-   
+# ── CELL 11: DATA CLEANING ─────────────────────────────────────
+"""
+CLEANING STRATEGY
+─────────────────
+1. meanpressure: Values outside [900, 1100] hPa are physically impossible
+   for Delhi. Replace with rolling median (3-day window).
+2. wind_speed:   Negative values (physically impossible) → set to NaN → fill.
+3. humidity:     Values > 100 are impossible → cap at 100.
+4. After capping, fill any residual NaNs with forward-fill then backward-fill.
+"""
 
 def clean_weather_data(df):
     df = df.copy()
 
-                          
+    # --- meanpressure ---
     mask_pressure = (df['meanpressure'] < 900) | (df['meanpressure'] > 1100)
     print(f"Fixing {mask_pressure.sum()} bad pressure rows")
     df.loc[mask_pressure, 'meanpressure'] = np.nan
@@ -125,17 +150,17 @@ def clean_weather_data(df):
         df['meanpressure'].rolling(3, min_periods=1, center=True).median()
     )
 
-                        
+    # --- wind_speed ---
     mask_wind = df['wind_speed'] < 0
     print(f"Fixing {mask_wind.sum()} negative wind rows")
     df.loc[mask_wind, 'wind_speed'] = np.nan
 
-                      
+    # --- humidity ---
     mask_hum = df['humidity'] > 100
     print(f"Capping {mask_hum.sum()} humidity rows > 100")
     df.loc[mask_hum, 'humidity'] = 100.0
 
-                         
+    # Fill remaining NaNs
     numeric_cols = ['meantemp', 'humidity', 'wind_speed', 'meanpressure']
     df[numeric_cols] = df[numeric_cols].ffill().bfill()
 
@@ -144,7 +169,7 @@ def clean_weather_data(df):
 train_clean = clean_weather_data(train.copy())
 test_clean  = clean_weather_data(test.copy())
 
-                                                                
+# ── CELL 12: Before / After Comparison ────────────────────────
 print("\n=== BEFORE vs AFTER CLEANING ===")
 print(f"\nmeanpressure  BEFORE: min={train['meanpressure'].min():.2f}, "
       f"max={train['meanpressure'].max():.2f}")
@@ -154,7 +179,7 @@ print(f"meanpressure  AFTER : min={train_clean['meanpressure'].min():.2f}, "
 print(f"\nMissing values BEFORE: {train.isnull().sum().sum()}")
 print(f"Missing values AFTER : {train_clean.isnull().sum().sum()}")
 
-                                                                
+# ── CELL 13: Save Cleaned Data ────────────────────────────────
 train_clean.to_csv("data/processed/train_clean.csv", index=False)
 test_clean.to_csv("data/processed/test_clean.csv",  index=False)
 print("\n✅ Cleaned data saved to data/processed/")
