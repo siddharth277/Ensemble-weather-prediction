@@ -78,7 +78,7 @@ plt.title('Average Monthly Temperature (Delhi, 2013–2017)', fontsize=13)
 plt.xlabel('Month')
 plt.ylabel('Avg Temperature (°C)')
 plt.xticks(range(12), ['Jan','Feb','Mar','Apr','May','Jun',
-                             ,'Aug','Sep','Oct','Nov','Dec'], rotation=0)
+                             'Aug','Sep','Oct','Nov','Dec'], rotation=0)
 plt.tight_layout()
 plt.savefig("reports/eda_monthly.png", dpi=150, bbox_inches='tight')
 plt.show()
