@@ -115,11 +115,11 @@ combined_df = pd.concat([train_df, test_df], ignore_index=True)\
 scaler = MinMaxScaler(feature_range=(0, 1))
 scaler.fit(train_df[feature_cols])
 
-# ✅ FIX: SAVE SCALER
+# ✅ IMPORTANT FIX — SAVE TRAINING SCALER (DO NOT REMOVE)
 import joblib
 os.makedirs('models', exist_ok=True)
 joblib.dump(scaler, 'models/lstm_scaler.pkl')
-print("Saved lstm_scaler.pkl")
+print("✅ Saved lstm_scaler.pkl")
 
 combined_scaled = scaler.transform(combined_df[feature_cols])
 
@@ -178,4 +178,4 @@ history = model.fit(
 # ── CELL 7: SAVE MODEL ────────────────────────────────────────────────────────
 model.save('models/lstm_model.keras')
 
-print("\n✅ DONE — scaler + model saved")
+print("\n✅ DONE — scaler + model saved successfully")
