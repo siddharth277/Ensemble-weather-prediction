@@ -1,7 +1,50 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 12: ENSEMBLE — Combine All Model Predictions Into One Final Forecast
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# PURPOSE:
+#   Loads prediction CSVs from every model, merges on date, builds a weighted
+#   average ensemble, evaluates all models side-by-side, and saves the final
+#   combined forecast.
+#
+# PREREQUISITES (run in this order before this script):
+#   1.  02_eda_cleaning.py
+#   2a. 03_feature_engineering.py  →  04_model_train_evaluate.py   (XGB, LGB)
+#   2b. 05_lstm_model.py                                            (LSTM)
+#   2c. 05_arima_model.py                                           (AR, ARIMA, SARIMA)
+#
+# INPUT  : data/predictions/xgb.csv
+#          data/predictions/lgb.csv
+#          data/predictions/lstm.csv
+#          data/predictions/arima.csv
+#          data/predictions/sarima.csv
+#          (ar.csv is also loaded if present, for reference)
+#
+# OUTPUT : data/predictions/ensemble_final.csv
+#          reports/ensemble_all_models.png
+#          reports/ensemble_comparison_bar.png
+#
+# PREDICTION FILE FORMAT (all models must produce this schema):
+#   date        : YYYY-MM-DD  — the test date being predicted
+#   id          : int 0..N-1  — row index for deterministic merging
+#   prediction  : float       — predicted meantemp in °C
+#   actual      : float       — observed meantemp in °C (for evaluation)
+#
+# ALIGNMENT GUARANTEE:
+#   All models predict on the same 114 test dates (2017-01-01 → 2017-04-24).
+#   The inner join on 'date' in Cell 3 ensures only common dates are kept,
+#   so the ensemble is never contaminated by misaligned rows.
+#
+# ENSEMBLE STRATEGY:
+#   Weighted average — higher weight to models with lower historical RMSE.
+#   Default weights are a reasonable starting point; tune them in the
+#   WEIGHTS dict below after inspecting each model's individual RMSE.
+# ══════════════════════════════════════════════════════════════════════════════
+
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')                                                 
+matplotlib.use('Agg')   # non-interactive — safe for scripts and Colab
 import matplotlib.pyplot as plt
 import os
 import warnings
@@ -13,47 +56,48 @@ print("=" * 65)
 print("  ENSEMBLE — Combining All Model Predictions")
 print("=" * 65)
 
-                                                                                
- 
-                                                                    
-        
-                     
-                                                     
-                                                                           
-                                                                         
- 
-                     
-                                                                       
-                                                                          
-                                                                
-                                                                   
-              
+# ── CELL 1: ENSEMBLE CONFIG ───────────────────────────────────────────────────
+#
+# WEIGHTS — how much each model contributes to the final prediction.
+# Rules:
+#   • Must sum to 1.0
+#   • Increase weight for models with lower test RMSE
+#   • If a model file is missing it is skipped and weights are renormalised
+#     automatically — the ensemble still runs with whatever is available.
+#
+# Starting rationale:
+#   XGB / LGB : 0.25 each — advanced feature engineering gives ~R²=0.98
+#   LSTM      : 0.20      — captures nonlinear temporal patterns, ~R²=0.95
+#   ARIMA     : 0.15      — solid statistical baseline, ~R²=0.90
+#   SARIMA    : 0.15      — adds seasonal component on top of ARIMA
+# Total = 1.00
 
 WEIGHTS = {
-            : 0.25,
-            : 0.25,
-            : 0.20,
-            : 0.15,
-            : 0.15,
+    'xgb'   : 0.25,
+    'lgb'   : 0.25,
+    'lstm'  : 0.20,
+    'arima' : 0.15,
+    'sarima': 0.15,
 }
 
 PRED_DIR    = 'data/predictions'
 REPORT_DIR  = 'reports'
 OUTPUT_FILE = 'data/predictions/ensemble_final.csv'
 
-assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9,    f"WEIGHTS must sum to 1.0, got {sum(WEIGHTS.values()):.4f}"
+assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, \
+    f"WEIGHTS must sum to 1.0, got {sum(WEIGHTS.values()):.4f}"
 
-                                                                               
- 
-                                                                     
-                                                                         
-                                                                          
+# ── CELL 2: LOAD PREDICTION FILES ────────────────────────────────────────────
+#
+# Each CSV is expected to have columns: date, id, prediction, actual.
+# The 'actual' column must be identical across all files (same test set).
+# Missing files are skipped with a warning — ensemble degrades gracefully.
 
 print(f"\n  Loading prediction files from '{PRED_DIR}/'...")
 print(f"  {'─'*50}")
 
-frames  = {}                                    
-missing = []                                            
+frames  = {}           # model_name -> DataFrame
+missing = []           # models whose file was not found
 
 for model_name in WEIGHTS:
     path = os.path.join(PRED_DIR, f'{model_name}.csv')
@@ -61,7 +105,7 @@ for model_name in WEIGHTS:
         df = pd.read_csv(path, parse_dates=['date'])
         df = df.sort_values('date').reset_index(drop=True)
 
-                                   
+        # Validate required columns
         required = {'date', 'prediction', 'actual'}
         if not required.issubset(df.columns):
             print(f"  SKIP {model_name:8s}: missing columns "
@@ -89,9 +133,9 @@ if len(frames) < 2:
         f"  05_arima_model.py           →  arima.csv, sarima.csv"
     )
 
-                                                                               
-                                                                        
-                                                                         
+# ── CELL 3: RECALCULATE WEIGHTS FOR AVAILABLE MODELS ─────────────────────────
+# If any model files were missing, renormalise remaining weights so they
+# still sum to 1.0. This lets the ensemble work even during partial runs.
 
 active_weights = {m: WEIGHTS[m] for m in frames}
 total_w = sum(active_weights.values())
@@ -102,18 +146,18 @@ for m, w in active_weights.items():
     bar = '█' * int(w * 40)
     print(f"    {m:8s}  {w:.3f}  {bar}")
 
-                                                                               
- 
-                                        
-                                                                          
-                                                                          
-                                                                          
-                                                                      
+# ── CELL 4: MERGE ALL PREDICTIONS ON DATE ────────────────────────────────────
+#
+# Strategy: inner join on 'date' column.
+# All models should produce predictions for the same 114 test dates, so an
+# inner join should retain all rows.  If a model has gaps (e.g. LSTM loses
+# a few rows due to windowing), the join silently drops those dates — this
+# is the correct behaviour (better than NaN-contaminated predictions).
 
 print(f"\n  Merging predictions on 'date' (inner join)...")
 
 merged  = None
-actuals = None                                                            
+actuals = None   # taken from the first loaded model — should be identical
 
 for model_name, df in frames.items():
     pred_col = df[['date', 'prediction']].rename(
@@ -125,7 +169,7 @@ for model_name, df in frames.items():
     else:
         merged = merged.merge(pred_col, on='date', how='inner')
 
-                          
+# Attach the actual values
 merged = merged.merge(actuals, on='date', how='inner')
 merged = merged.sort_values('date').reset_index(drop=True)
 merged['id'] = range(len(merged))
@@ -138,8 +182,8 @@ if len(merged) < 100:
     print(f"\n  WARNING: only {len(merged)} rows after merge.")
     print("  Check that all model scripts ran on the same test set.")
 
-                                                                               
-                                              
+# ── CELL 5: BUILD ENSEMBLE PREDICTION ────────────────────────────────────────
+# Weighted average: Σ(weight_i × prediction_i)
 
 merged['prediction_ensemble'] = sum(
     w * merged[f'pred_{m}'] for m, w in active_weights.items()
@@ -149,7 +193,7 @@ print(f"\n  Ensemble prediction range : "
       f"[{merged.prediction_ensemble.min():.2f}, "
       f"{merged.prediction_ensemble.max():.2f}]°C")
 
-                                                                               
+# ── CELL 6: EVALUATE ALL MODELS + ENSEMBLE ───────────────────────────────────
 actual = merged['actual'].values
 
 def compute_metrics(actual, pred, label=''):
@@ -165,7 +209,7 @@ def compute_metrics(actual, pred, label=''):
         print(f"    MAPE  : {mape:.2f}%")
         print(f"    R²    : {r2:.4f}")
     return {'model': label, 'RMSE': round(rmse, 4),
-                 : round(mae, 4), 'MAPE': round(mape, 2), 'R2': round(r2, 4)}
+            'MAE': round(mae, 4), 'MAPE': round(mape, 2), 'R2': round(r2, 4)}
 
 print("\n" + "=" * 65)
 print("  INDIVIDUAL MODEL METRICS")
@@ -183,14 +227,14 @@ ens_result = compute_metrics(
 )
 results.append(ens_result)
 
-                               
+# Sort by RMSE for easy reading
 comparison = pd.DataFrame(results).sort_values('RMSE').reset_index(drop=True)
 print("\n" + "=" * 65)
 print("  FULL RANKING (sorted by RMSE ↑ = better)")
 print("=" * 65)
 print(comparison.to_string(index=False))
 
-                                                 
+# Summary: did the ensemble beat all individuals?
 best_individual_rmse  = comparison[
     comparison.model != 'ENSEMBLE (weighted avg)'
 ]['RMSE'].min()
@@ -206,7 +250,7 @@ else:
     print(f"  Ensemble is {abs(delta):.4f} °C worse than best individual.")
     print("  Tip: reduce weight of weaker models in the WEIGHTS dict.")
 
-                                                                               
+# ── CELL 7: FULL FORECAST COMPARISON PLOT ────────────────────────────────────
 os.makedirs(REPORT_DIR, exist_ok=True)
 
 dates    = merged['date'].values
@@ -217,9 +261,9 @@ fig, axes = plt.subplots(n_models + 1, 1,
                           figsize=(14, 4 * (n_models + 1)),
                           sharex=True)
 fig.suptitle('All Models — Actual vs Predicted Temperature\n'
-                                    , fontsize=14, fontweight='bold')
+             '(Delhi 2017 Test Set)', fontsize=14, fontweight='bold')
 
-                           
+# Individual model subplots
 for ax, m, color in zip(axes[:n_models], list(frames.keys()), palette):
     pred   = merged[f'pred_{m}'].values
     r_row  = comparison[comparison.model == m.upper()].iloc[0]
@@ -236,7 +280,7 @@ for ax, m, color in zip(axes[:n_models], list(frames.keys()), palette):
     ax.legend(fontsize=8, loc='upper left')
     ax.grid(True, alpha=0.3)
 
-                         
+# Ensemble subplot (last)
 ax_ens = axes[-1]
 ens_r  = comparison[comparison.model == 'ENSEMBLE (weighted avg)'].iloc[0]
 ax_ens.plot(dates, actual,
@@ -261,7 +305,7 @@ plt.savefig(os.path.join(REPORT_DIR, 'ensemble_all_models.png'),
 plt.close()
 print(f"\n  Saved → reports/ensemble_all_models.png")
 
-                                                                               
+# ── CELL 8: METRIC COMPARISON BAR CHART ──────────────────────────────────────
 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 fig.suptitle('Model Performance Comparison', fontsize=13, fontweight='bold')
 
@@ -297,7 +341,7 @@ plt.savefig(os.path.join(REPORT_DIR, 'ensemble_comparison_bar.png'),
 plt.close()
 print("  Saved → reports/ensemble_comparison_bar.png")
 
-                                                                               
+# ── CELL 9: RESIDUAL PLOT ────────────────────────────────────────────────────
 ens_residuals = actual - merged['prediction_ensemble'].values
 fig, axes = plt.subplots(1, 2, figsize=(13, 4))
 fig.suptitle('Ensemble Residual Analysis', fontsize=12, fontweight='bold')
@@ -326,8 +370,8 @@ plt.savefig(os.path.join(REPORT_DIR, 'ensemble_residuals.png'),
 plt.close()
 print("  Saved → reports/ensemble_residuals.png")
 
-                                                                               
-                                                                 
+# ── CELL 10: SAVE FINAL OUTPUT CSV ───────────────────────────────────────────
+# Columns: date, id, actual, pred_<model>..., prediction_ensemble
 output_cols = (
     ['date', 'id', 'actual']
     + [f'pred_{m}' for m in frames]
@@ -337,7 +381,7 @@ merged[output_cols].to_csv(OUTPUT_FILE, index=False)
 print(f"\n  Saved → {OUTPUT_FILE}  ({len(merged)} rows)")
 print(f"  Columns: {output_cols}")
 
-                                                                               
+# ── CELL 11: FINAL SUMMARY ───────────────────────────────────────────────────
 print("\n" + "=" * 65)
 print("  ENSEMBLE PIPELINE COMPLETE — FINAL SUMMARY")
 print("=" * 65)
@@ -351,7 +395,8 @@ print()
 print(f"  {'Model':<28}  {'RMSE':>8}  {'MAE':>8}  {'R²':>8}")
 print(f"  {'─'*58}")
 for _, row in comparison.iterrows():
-    marker = ' ←' if row.model == 'ENSEMBLE (weighted avg)' else             ' ★' if row.RMSE == comparison.RMSE.min() else ''
+    marker = ' ←' if row.model == 'ENSEMBLE (weighted avg)' else \
+             ' ★' if row.RMSE == comparison.RMSE.min() else ''
     print(f"  {row.model:<28}  {row.RMSE:>8.4f}  {row.MAE:>8.4f}  {row.R2:>8.4f}{marker}")
 print()
 print("  Outputs:")
