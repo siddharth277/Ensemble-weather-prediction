@@ -1,3 +1,33 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 11: AR / ARIMA / SARIMA MODELS — Statistical Time-Series Forecasting
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# PIPELINE    : Statistical (AR, ARIMA, SARIMA — all in one script)
+# METHOD      : Walk-forward prediction — fit on train, extend one step at a
+#               time using the true observed value (oracle walk-forward).
+#               This is the correct evaluation protocol for time-series models.
+#
+# DATA FLOW:
+#   Input  : data/raw/Train.csv + data/raw/Test.csv
+#            Applies minimal data cleaning (pressure outliers, wind cap)
+#            identical to what teammates' notebooks did.
+#   Output : data/predictions/ar.csv
+#            data/predictions/arima.csv
+#            data/predictions/sarima.csv
+#            Each: columns = date, id, prediction, actual
+#            models/ar_model.pkl
+#            models/arima_model.pkl
+#            models/sarima_model.pkl
+#
+# ALIGNMENT:  Walk-forward yields exactly one prediction per test date = 114 rows.
+#             id = 0..113 matches all other model prediction files for ensemble.
+#
+# WHY SEPARATE FROM ML PIPELINE?
+#   AR/ARIMA/SARIMA operate on the univariate temperature series.
+#   They don't need engineered features — they model temporal autocorrelation
+#   directly. Mixing with XGB/LGB data would add unnecessary coupling.
+# ══════════════════════════════════════════════════════════════════════════════
+
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -17,12 +47,12 @@ print("=" * 62)
 print("  AR / ARIMA / SARIMA — Statistical Time-Series Models")
 print("=" * 62)
 
-                                                                                
- 
-                                                                 
-                                                                     
-                                                               
-                                                                           
+# ── CELL 1: LOAD & CLEAN DATA ─────────────────────────────────────────────────
+#
+# Cleaning matches exactly what teammates did in their notebooks:
+#   1. Fix pressure outliers (outside 950–1100 hPa) via interpolation
+#   2. Cap wind speed at 95th percentile (fitted on train only)
+# This is the ONLY preprocessing done here — no feature engineering needed.
 
 train_data = pd.read_csv('data/raw/Train.csv', parse_dates=['date'])
 test_data  = pd.read_csv('data/raw/Test.csv',  parse_dates=['date'])
@@ -35,9 +65,9 @@ print(f"\n  Train : {len(train_data)} rows  "
 print(f"  Test  : {len(test_data)} rows   "
       f"{test_data['date'].iloc[0].date()} -> {test_data['date'].iloc[-1].date()}")
 
-                                                                             
-                                                         
-                                                               
+# -- Fix pressure outliers --------------------------------------------------
+# Physical range for sea-level pressure is ~950–1100 hPa.
+# Values outside this are sensor errors — interpolate linearly.
 def fix_pressure(series):
     s = series.where((series >= 950) & (series <= 1100))
     return s.interpolate(method='linear').ffill().bfill()
@@ -45,7 +75,7 @@ def fix_pressure(series):
 train_data['meanpressure'] = fix_pressure(train_data['meanpressure'])
 test_data['meanpressure']  = fix_pressure(test_data['meanpressure'])
 
-                                                                              
+# -- Cap wind speed at 95th percentile of train (prevent outlier influence) --
 wind_cap = train_data['wind_speed'].quantile(0.95)
 train_data['wind_speed'] = train_data['wind_speed'].clip(upper=wind_cap)
 test_data['wind_speed']  = test_data['wind_speed'].clip(upper=wind_cap)
@@ -59,7 +89,7 @@ print(f"\n  Train temperature: mean={train_vals.mean():.2f}°C  "
 print(f"  Test  temperature: mean={test_vals.mean():.2f}°C   "
       f"std={test_vals.std():.2f}°C")
 
-                                                                                
+# ── CELL 2: EVALUATION HELPER ─────────────────────────────────────────────────
 def evaluate(actual, pred, label=''):
     rmse = np.sqrt(mean_squared_error(actual, pred))
     mae  = mean_absolute_error(actual, pred)
@@ -74,26 +104,27 @@ def evaluate(actual, pred, label=''):
         print(f"  R²     : {r2:.4f}")
     return rmse, mae, mape, r2
 
-                                                                                
- 
-                                                                      
-                                                                              
-                                                                           
-                                                                           
+# ── CELL 3: WALK-FORWARD FUNCTIONS ────────────────────────────────────────────
+#
+# Walk-forward evaluation: the correct way to test time-series models.
+# After each prediction we feed the TRUE observed value back into the history.
+# This matches how these models would be used in production (daily re-fit).
+# ARIMA/SARIMA use model.append() for efficiency (no full refit each step).
 
 def walk_forward_ar(train, test, lags):
-                                                                              
+    """AutoReg walk-forward: refit at each step (fast for small AR models)."""
     history = list(train)
     preds   = []
     for i in range(len(test)):
         m    = AutoReg(history, lags=lags, old_names=False).fit()
         pred = m.predict(start=len(history), end=len(history))[0]
         preds.append(pred)
-        history.append(test[i])                       
+        history.append(test[i])   # roll in TRUE value
     return np.array(preds)
 
+
 def walk_forward_arima(train, test, order):
-                                                                        
+    """ARIMA walk-forward using model.append() — fast, no full refit."""
     history = list(train)
     preds   = []
     m       = ARIMA(history, order=order).fit()
@@ -103,8 +134,9 @@ def walk_forward_arima(train, test, order):
         m = m.append([test[i]], refit=False)
     return np.array(preds)
 
+
 def walk_forward_sarima(train, test, order, seasonal_order):
-                                                                         
+    """SARIMA walk-forward using model.append() — fast, no full refit."""
     history = list(train)
     preds   = []
     m = SARIMAX(
@@ -116,11 +148,11 @@ def walk_forward_sarima(train, test, order, seasonal_order):
         m = m.append([test[i]], refit=False)
     return np.array(preds)
 
-                                                                                
- 
-                                            
-                                     
-                                                                              
+# ── CELL 4: AR — LAG SCAN ─────────────────────────────────────────────────────
+#
+# Try AR models with lags p = 1, 2, 3, 5, 7.
+# Best lag = lowest RMSE on test set.
+# AR(p) models temperature as a linear combination of the past p temperatures.
 
 print(f"\n  {'='*40}")
 print(f"  AR WALK-FORWARD — scanning lags p = [1,2,3,5,7]")
@@ -138,10 +170,10 @@ best_p      = min(ar_scan, key=lambda p: ar_scan[p][0])
 ar_pred     = ar_scan[best_p][4]
 print(f"\n  -> Best AR lag = {best_p}  (RMSE = {ar_scan[best_p][0]:.4f})")
 
-                                                                                
- 
-                                                                                 
-                                                          
+# ── CELL 5: ARIMA — ORDER SCAN ────────────────────────────────────────────────
+#
+# ARIMA(p, d, q): d=1 confirmed by ADF test (meantemp is non-stationary in level,
+# stationary after 1st difference). Scan p,q combinations.
 
 print(f"\n  {'='*40}")
 print(f"  ARIMA WALK-FORWARD — scanning (p,1,q) orders")
@@ -163,11 +195,11 @@ arima_pred     = arima_scan[best_pq][4]
 print(f"\n  -> Best ARIMA = ({best_pq[0]},1,{best_pq[1]})  "
       f"(RMSE = {arima_scan[best_pq][0]:.4f})")
 
-                                                                                
- 
-                                                                              
-                                                                        
-                                                              
+# ── CELL 6: SARIMA — GRID SEARCH ──────────────────────────────────────────────
+#
+# SARIMA(p,d,q)(P,D,Q,s): d=1 (trend diff), D=1 (seasonal diff), s=7 (weekly).
+# Temperature shows weekly seasonality (weekday patterns in Delhi data).
+# Candidates from ACF/PACF analysis on diff(7)+diff(1) series.
 
 print(f"\n  {'='*40}")
 print(f"  SARIMA GRID SEARCH — (d=1, D=1, s=7)")
@@ -175,12 +207,12 @@ print(f"  {'='*40}")
 print(f"  {'Model':<38}  {'RMSE':>8}  {'MAE':>8}  {'R²':>8}")
 
 sarima_configs = [
-    ((1,1,1), (0,1,1,7)),                           
-    ((1,1,1), (1,1,1,7)),                    
-    ((2,1,1), (0,1,1,7)),            
-    ((1,1,2), (0,1,1,7)),            
-    ((2,1,1), (1,1,1,7)),                 
-    ((1,1,1), (2,1,1,7)),                       
+    ((1,1,1), (0,1,1,7)),   # baseline from ACF/PACF
+    ((1,1,1), (1,1,1,7)),   # add seasonal AR
+    ((2,1,1), (0,1,1,7)),   # more AR
+    ((1,1,2), (0,1,1,7)),   # more MA
+    ((2,1,1), (1,1,1,7)),   # richer model
+    ((1,1,1), (2,1,1,7)),   # higher seasonal AR
 ]
 
 sarima_results = []
@@ -194,7 +226,7 @@ for order, seas in sarima_configs:
     except Exception as e:
         print(f"  SARIMA{order}{seas} FAILED: {e}")
 
-                     
+# Best SARIMA by RMSE
 sarima_results.sort(key=lambda x: x[3])
 best_sarima           = sarima_results[0]
 best_sarima_label     = best_sarima[0]
@@ -204,7 +236,7 @@ sarima_pred           = best_sarima[7]
 
 print(f"\n  -> Best: {best_sarima_label}  (RMSE = {best_sarima[3]:.4f})")
 
-                                                                                
+# ── CELL 7: FINAL METRICS ─────────────────────────────────────────────────────
 print("\n" + "=" * 62)
 print("  STATISTICAL MODELS — FINAL TEST METRICS")
 print("=" * 62)
@@ -212,7 +244,7 @@ ar_metrics     = evaluate(test_vals, ar_pred,     f"AR(p={best_p})")
 arima_metrics  = evaluate(test_vals, arima_pred,  f"ARIMA({best_pq[0]},1,{best_pq[1]})")
 sarima_metrics = evaluate(test_vals, sarima_pred, f"SARIMA {best_sarima_label}")
 
-                                                                                
+# ── CELL 8: PREDICTION PLOTS ──────────────────────────────────────────────────
 os.makedirs('reports', exist_ok=True)
 
 fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
@@ -240,20 +272,20 @@ plt.savefig('reports/arima_predictions.png', dpi=150, bbox_inches='tight')
 plt.close()
 print("\n  Saved -> reports/arima_predictions.png")
 
-                                                                                
- 
-                                        
-                                                                  
-                                                                
+# ── CELL 9: SAVE PREDICTION CSVs FOR ENSEMBLE ─────────────────────────────────
+#
+# Each CSV: date, id, prediction, actual
+# id = 0..113 (integer row index) — ensemble joins on this column.
+# All three files have the same 114 rows in the same date order.
 
 os.makedirs('data/predictions', exist_ok=True)
 
 def save_preds(dates, preds, actual, filename, model_label):
     df = pd.DataFrame({
-                    : dates,
-                    : range(len(preds)),
-                    : preds,
-                    : actual
+        'date'      : dates,
+        'id'        : range(len(preds)),
+        'prediction': preds,
+        'actual'    : actual
     })
     df.to_csv(filename, index=False)
     print(f"  Saved -> {filename}  ({len(df)} rows)  "
@@ -264,7 +296,7 @@ save_preds(test_dates, ar_pred,     test_vals, 'data/predictions/ar.csv',     'A
 save_preds(test_dates, arima_pred,  test_vals, 'data/predictions/arima.csv',  'ARIMA')
 save_preds(test_dates, sarima_pred, test_vals, 'data/predictions/sarima.csv', 'SARIMA')
 
-                                                                                
+# ── CELL 10: SAVE MODELS ──────────────────────────────────────────────────────
 os.makedirs('models', exist_ok=True)
 
 ar_model_final = AutoReg(train_vals, lags=best_p, old_names=False).fit()
@@ -285,7 +317,7 @@ sarima_model_final = SARIMAX(
 joblib.dump(sarima_model_final, 'models/sarima_model.pkl')
 print("  Saved -> models/sarima_model.pkl")
 
-                                                                                
+# ── CELL 11: SUMMARY ──────────────────────────────────────────────────────────
 print("\n" + "=" * 62)
 print("  STATISTICAL MODELS PIPELINE COMPLETE")
 print("=" * 62)
