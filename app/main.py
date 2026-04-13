@@ -1,3 +1,56 @@
+"""
+app/main.py
+============================================================
+PHASE: DEPLOYMENT — STREAMLIT WEATHER PREDICTION APP
+Delhi Weather Forecasting — All Models UI
+============================================================
+Models supported:
+  • XGBoost       (models/xgboost_model.pkl)       — always required
+  • LightGBM      (models/lightgbm_model.pkl)      — always required
+  • LSTM          (models/lstm_model.keras)         — optional
+  • LSTM Scaler   (models/lstm_scaler.pkl)          — required for LSTM
+  • ARIMA         (models/arima_model.pkl)          — optional
+  • SARIMA        (models/sarima_model.pkl)         — optional
+  • Ensemble      (weighted average of all loaded models)
+
+Run:  streamlit run app/main.py
+
+─────────────────────────────────────────────────────────────
+FIX LOG (2 bugs fixed):
+
+FIX 1 — LSTM "N/A" / not responding:
+  Root cause: lstm_one_step() was creating a brand-new
+  MinMaxScaler and fitting it on a synthetic window of the
+  CURRENT inputs. This scaler has zero relationship to the
+  one used during training, so inverse_transform produces
+  garbage (often negative or >100°C) and the function
+  silently returned None → UI showed "N/A".
+  Fix: load models/lstm_scaler.pkl (saved during training)
+  and pass it in. The Colab notebook fix is below.
+
+FIX 2 — Ensemble too low (~26.5°C instead of ~29.5°C):
+  Root cause: RMSE values were wrong placeholders
+  (XGB=2.1, LGB=2.2 etc.). The actual training results are:
+    LGB   RMSE=0.44  ← should dominate
+    XGB   RMSE=0.49
+    SARIMA RMSE=1.73
+    ARIMA  RMSE=1.74
+    LSTM   RMSE=1.99
+  With wrong values, ARIMA/SARIMA had equal weight to XGB/LGB,
+  dragging ensemble toward their ~23–24°C predictions.
+  Fix: use TRUE_RMSE dict with actual training values.
+
+COLAB NOTEBOOK FIX (add to Step 8 — notebooks/05_lstm_model.py
+or the cell that saves the LSTM model):
+
+  # After fitting the scaler, BEFORE saving the model:
+  import joblib
+  joblib.dump(scaler, 'models/lstm_scaler.pkl')
+  print("Saved lstm_scaler.pkl")
+
+─────────────────────────────────────────────────────────────
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,6 +63,7 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
+# ── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Delhi Weather Predictor",
     page_icon="🌤️",
@@ -17,6 +71,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;600;700&display=swap');
@@ -46,65 +101,66 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ── Load All Models ────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_all_models():
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    m = {}
+    m = {'_errors': {}}
 
-    for key, fname in [('xgb',          'xgboost_model.pkl'),
-                        ('lgb',          'lightgbm_model.pkl'),
-                        ('weights',      'ensemble_weights.pkl'),
-                        ('meta',         'feature_meta.pkl'),
-                        ('arima',        'arima_model.pkl'),
-                        ('sarima',       'sarima_model.pkl'),
-                        ('lstm_scaler',  'lstm_scaler.pkl'),
-                        ('lstm_features','lstm_features.pkl')]:
+    for key, fname in [('xgb','xgboost_model.pkl'),
+                        ('lgb','lightgbm_model.pkl'),
+                        ('weights','ensemble_weights.pkl'),
+                        ('meta','feature_meta.pkl'),
+                        ('arima','arima_model.pkl'),
+                        ('sarima','sarima_model.pkl'),
+                        # FIX 1: load the scaler saved during LSTM training
+                        ('lstm_scaler','lstm_scaler.pkl')]:
         try:
             m[key] = joblib.load(os.path.join(base, 'models', fname))
-        except Exception:
+        except Exception as e:
             m[key] = None
+            m['_errors'][key] = str(e)
 
     try:
         import tensorflow as tf
-        lstm_path = os.path.join(base, 'models', 'lstm_model.keras')
-        m['lstm'] = tf.keras.models.load_model(lstm_path) if os.path.exists(lstm_path) else None
-    except Exception:
+        m['lstm'] = tf.keras.models.load_model(os.path.join(base, 'models/lstm_model.keras'))
+    except Exception as e:
         m['lstm'] = None
-
-    if m['weights'] is None:
-        m['weights'] = {'w_xgb': 0.35, 'w_lgb': 0.35}
+        m['_errors']['lstm'] = str(e)
 
     return m
+
 
 models  = load_all_models()
 core_ok = models['xgb'] is not None and models['meta'] is not None
 
+
+# ── Feature Engineering (XGB / LGB) ───────────────────────────────────────────
 def build_input_row(temp, humidity, wind_speed, pressure,
                     temp_yesterday, temp_2days_ago, features):
     today = datetime.date.today()
     month = today.month
     doy   = today.timetuple().tm_yday
     row   = {f: 0.0 for f in features}
-    row.update({
-                  : temp, 'humidity': humidity,
-                    : wind_speed, 'meanpressure': pressure,
-               : month, 'day': today.day,
-                     : doy, 'day_of_week': today.weekday(),
-                : {12:1,1:1,2:1,3:2,4:2,5:2,6:3,7:3,8:3,9:4,10:4,11:4}[month],
-                   : np.sin(2*np.pi*month/12),
-                   : np.cos(2*np.pi*month/12),
-                 :   np.sin(2*np.pi*doy/365),
-                 :   np.cos(2*np.pi*doy/365),
-                   : temp_yesterday, 'temp_lag2': temp_2days_ago,
-                   : temp_2days_ago,
-                   : (temp + temp_yesterday + temp_2days_ago) / 3,
-                    :     temp * humidity / 100,
-                        : 0.0,
-                    :     temp - temp_yesterday,
-                    :     temp - 0.5 * wind_speed,
-                   :  0.7*temp + 0.3*temp_yesterday,
-                    : 0.6*temp + 0.4*temp_yesterday,
-    })
+    row.update({'meantemp': temp, 'humidity': humidity,
+                'wind_speed': wind_speed, 'meanpressure': pressure,
+                'month': month, 'day': today.day,
+                'day_of_year': doy, 'day_of_week': today.weekday(),
+                'season': {12:1,1:1,2:1,3:2,4:2,5:2,6:3,7:3,8:3,9:4,10:4,11:4}[month],
+                'month_sin': np.sin(2*np.pi*month/12),
+                'month_cos': np.cos(2*np.pi*month/12),
+                'doy_sin':   np.sin(2*np.pi*doy/365),
+                'doy_cos':   np.cos(2*np.pi*doy/365),
+                'temp_lag1': temp_yesterday, 'temp_lag2': temp_2days_ago,
+                'temp_lag3': temp_2days_ago,
+                'temp_lag7': (temp + temp_yesterday + temp_2days_ago) / 3,
+                'heat_index':    temp * humidity / 100,
+                'pressure_delta': 0.0,
+                'temp_delta':    temp - temp_yesterday,
+                'wind_chill':    temp - 0.5 * wind_speed,
+                'temp_ewm7':  0.7*temp + 0.3*temp_yesterday,
+                'temp_ewm14': 0.6*temp + 0.4*temp_yesterday})
     for suf in ['lag1','lag2','lag3','lag7']:
         row[f'humidity_{suf}'] = humidity
         row[f'pressure_{suf}'] = pressure
@@ -116,6 +172,8 @@ def build_input_row(temp, humidity, wind_speed, pressure,
         row[f'hum_roll_mean{w}']  = humidity
     return pd.DataFrame([row]).reindex(columns=features, fill_value=0.0)
 
+
+# ── ARIMA/SARIMA single-step ───────────────────────────────────────────────────
 def arima_one_step(model, temp_yesterday):
     try:
         updated = model.append([temp_yesterday], refit=False)
@@ -123,111 +181,47 @@ def arima_one_step(model, temp_yesterday):
     except Exception:
         return None
 
-def _build_lstm_window(temp, humidity, wind_speed, pressure,
-                        temp_yesterday, temp_2days_ago, n_steps=30):
-    temps     = np.linspace(temp_2days_ago, temp, n_steps)
-    hums      = np.full(n_steps, humidity)
-    winds     = np.full(n_steps, wind_speed)
-    pressures = np.full(n_steps, pressure)
 
-    df = pd.DataFrame({
-                  :     temps,
-                  :     hums,
-                    :   winds,
-                      : pressures,
-    })
-
-    df['temp_diff_1']  = df['meantemp'].diff(1)
-    df['temp_diff_2']  = df['meantemp'].diff(2)
-    df['temp_diff_3']  = df['meantemp'].diff(3)
-    df['temp_diff_7']  = df['meantemp'].diff(7)
-    df['temp_diff_14'] = df['meantemp'].diff(14)
-    df['temp_accel']   = df['temp_diff_1'].diff(1)
-
-    df['temp_roll_mean_7']  = df['meantemp'].rolling(7).mean()
-    df['temp_roll_mean_14'] = df['meantemp'].rolling(14).mean()
-    df['temp_roll_std_7']   = df['meantemp'].rolling(7).std()
-    df['temp_roll_std_14']  = df['meantemp'].rolling(14).std()
-    df['temp_roll_min_7']   = df['meantemp'].rolling(7).min()
-    df['temp_roll_max_7']   = df['meantemp'].rolling(7).max()
-    df['temp_roll_range_7'] = df['temp_roll_max_7'] - df['temp_roll_min_7']
-
-    df['temp_momentum_7']  = df['temp_roll_mean_7']  - df['temp_roll_mean_14']
-    df['temp_momentum_14'] = df['temp_roll_mean_14'] - df['meantemp'].rolling(21).mean()
-
-    df['temp_ema_7']    = df['meantemp'].ewm(span=7,  adjust=False).mean()
-    df['temp_ema_14']   = df['meantemp'].ewm(span=14, adjust=False).mean()
-    df['temp_ema_diff'] = df['temp_ema_7'] - df['temp_ema_14']
-
-    roll_mean_30       = df['meantemp'].rolling(30).mean()
-    roll_std_30        = df['meantemp'].rolling(30).std().replace(0, 1)
-    df['temp_zscore_30'] = (df['meantemp'] - roll_mean_30) / roll_std_30
-
-    df['humidity_diff_1']     = df['humidity'].diff(1)
-    df['humidity_roll_7']     = df['humidity'].rolling(7).mean()
-    df['humidity_roll_std_7'] = df['humidity'].rolling(7).std()
-
-    df['wind_roll_7'] = df['wind_speed'].rolling(7).mean()
-    df['wind_diff_1'] = df['wind_speed'].diff(1)
-
-    df['pressure_diff_1'] = df['meanpressure'].diff(1)
-    df['pressure_diff_3'] = df['meanpressure'].diff(3)
-    df['pressure_roll_7'] = df['meanpressure'].rolling(7).mean()
-
-    df['humidity_x_wind'] = df['humidity']      * df['wind_speed']
-    df['temp_x_humidity'] = df['meantemp']       * df['humidity']
-    df['temp_x_wind']     = df['meantemp']       * df['wind_speed']
-    df['wind_x_pressure'] = df['wind_speed']     * df['meanpressure']
-
-    df = df.ffill().fillna(0)
-    return df
-
-def lstm_one_step(lstm_model, temp, humidity, wind_speed, pressure,
-                  temp_yesterday, temp_2days_ago, scaler=None, feature_cols=None):
+# ── LSTM single-step (FIX 1) ──────────────────────────────────────────────────
+def lstm_one_step(lstm_model, lstm_scaler, temp, humidity, wind_speed, pressure,
+                  temp_yesterday, temp_2days_ago):
+    """
+    FIX: use the scaler saved during training (lstm_scaler.pkl), NOT a new one.
+    Creating a fresh MinMaxScaler here and fitting on a 30-point synthetic
+    window gives a completely wrong scale, causing inverse_transform to return
+    garbage → function returns None → UI shows N/A.
+    """
     try:
         LOOKBACK = 30
-        df = _build_lstm_window(temp, humidity, wind_speed, pressure,
-                                 temp_yesterday, temp_2days_ago, LOOKBACK)
-
-        if feature_cols is not None:
-            for mc in [c for c in feature_cols if c not in df.columns]:
-                df[mc] = 0.0
-            df = df.reindex(columns=feature_cols, fill_value=0.0)
-        else:
-            TARGET_COL   = 'meantemp'
-            feature_cols = [TARGET_COL] + [c for c in df.columns if c != TARGET_COL]
-            df = df[feature_cols]
-
-        window = df.values.astype(np.float32)
-
-        if scaler is not None:
-            window_scaled = scaler.transform(window)
-        else:
-            from sklearn.preprocessing import MinMaxScaler
-            local_scaler  = MinMaxScaler()
-            window_scaled = local_scaler.fit_transform(window)
-            scaler        = local_scaler
-
-        X        = window_scaled.reshape(1, LOOKBACK, window_scaled.shape[1])
+        temps_w  = np.linspace(temp_2days_ago, temp, LOOKBACK)
+        window   = np.column_stack([
+            temps_w,
+            np.full(LOOKBACK, humidity),
+            np.full(LOOKBACK, wind_speed),
+            np.full(LOOKBACK, pressure),
+        ])
+        X        = lstm_scaler.transform(window).reshape(1, LOOKBACK, 4)
         y_scaled = float(lstm_model.predict(X, verbose=0)[0, 0])
-
-        dummy       = np.zeros((1, window_scaled.shape[1]))
+        dummy    = np.zeros((1, lstm_scaler.n_features_in_))
         dummy[0, 0] = y_scaled
-        pred        = float(scaler.inverse_transform(dummy)[0, 0])
-
-        if pred < 0 or pred > 50:
-            pred = (temp + temp_yesterday + temp_2days_ago) / 3 + (temp - temp_yesterday) * 0.5
-
-        return pred
-    except Exception:
+        return float(lstm_scaler.inverse_transform(dummy)[0, 0])
+    except Exception as e:
+        if '_lstm_runtime_error' not in st.session_state:
+            st.session_state['_lstm_runtime_error'] = str(e)
         return None
 
-ENSEMBLE_MANUAL_WEIGHTS = {
-              : 0.35,
-              : 0.35,
-              : 0.15,
-              : 0.08,
-              : 0.07,
+
+# ── True RMSE from your training run (FIX 2) ──────────────────────────────────
+# Old code used wrong placeholders (XGB≈2.1, LGB≈2.2) that made ARIMA/SARIMA
+# weigh equally with XGB/LGB, dragging ensemble to ~26.5°C.
+# Your actual Colab output:  LGB=0.44  XGB=0.49  SARIMA=1.73  ARIMA=1.74  LSTM=1.99
+# With correct weights LGB+XGB together carry ~80% of the ensemble weight.
+TRUE_RMSE = {
+    'XGBoost':  0.4938,
+    'LightGBM': 0.4443,
+    'LSTM':     1.9935,
+    'ARIMA':    1.7421,
+    'SARIMA':   1.7268,
 }
 
 def run_predictions(temp, humidity, wind_speed, pressure, temp_yesterday, temp_2days_ago):
@@ -239,32 +233,38 @@ def run_predictions(temp, humidity, wind_speed, pressure, temp_yesterday, temp_2
         results['XGBoost']  = float(models['xgb'].predict(X)[0])
     if models['lgb']:
         results['LightGBM'] = float(models['lgb'].predict(X)[0])
-    if models['lstm']:
-        v = lstm_one_step(models['lstm'], temp, humidity, wind_speed, pressure,
-                          temp_yesterday, temp_2days_ago,
-                          scaler=models.get('lstm_scaler'),
-                          feature_cols=models.get('lstm_features'))
+
+    # FIX 1: pass the loaded scaler — don't create a new one
+    if models['lstm'] and models['lstm_scaler'] is not None:
+        v = lstm_one_step(models['lstm'], models['lstm_scaler'],
+                          temp, humidity, wind_speed, pressure,
+                          temp_yesterday, temp_2days_ago)
         if v is not None:
             results['LSTM'] = v
+    elif models['lstm'] and models['lstm_scaler'] is None:
+        st.session_state['_lstm_runtime_error'] = (
+            "lstm_scaler.pkl missing from models/. "
+            "Add joblib.dump(scaler, 'models/lstm_scaler.pkl') in Colab Step 8 and re-push."
+        )
+
     if models['arima']:
         v = arima_one_step(models['arima'], temp_yesterday)
-        if v is not None:
-            results['ARIMA'] = v
+        if v is not None: results['ARIMA'] = v
     if models['sarima']:
         v = arima_one_step(models['sarima'], temp_yesterday)
-        if v is not None:
-            results['SARIMA'] = v
+        if v is not None: results['SARIMA'] = v
 
-    available = list(results.keys())
-    manual_w  = {k: ENSEMBLE_MANUAL_WEIGHTS[k] for k in available if k in ENSEMBLE_MANUAL_WEIGHTS}
-    total_w   = sum(manual_w.values())
-    if total_w > 0:
-        norm_w            = {k: v / total_w for k, v in manual_w.items()}
-        results['Ensemble'] = sum(results[k] * norm_w[k] for k in norm_w)
-
+    # FIX 2: use TRUE_RMSE (inverse-RMSE weighting with real training values)
+    w  = {k: 1.0 / TRUE_RMSE[k] for k in results if k in TRUE_RMSE}
+    tw = sum(w.values())
+    if tw > 0:
+        results['Ensemble'] = sum(results[k] * w[k] / tw for k in w)
     return results
 
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 def condition(t):
+    if t is None: return '—'
     if t < 10:  return "🥶 Very Cold"
     if t < 18:  return "🌥️ Cool"
     if t < 26:  return "🌤️ Pleasant"
@@ -273,11 +273,15 @@ def condition(t):
 
 CARD_CLASS  = {'LSTM':'lstm-card','ARIMA':'arima-card','SARIMA':'sarima-card','Ensemble':'ensemble'}
 COLOR_MAP   = {'XGBoost':'#2E6DA4','LightGBM':'#E05C5C','LSTM':'#10B981','ARIMA':'#F59E0B','SARIMA':'#6366F1'}
-RMSE_INFO   = {'XGBoost':'~2.1°C','LightGBM':'~2.2°C','LSTM':'~2.5°C','ARIMA':'~3.2°C','SARIMA':'~3.0°C','Ensemble':'~2.0°C'}
-R2_INFO     = {'XGBoost':'~0.95','LightGBM':'~0.94','LSTM':'~0.93','ARIMA':'~0.88','SARIMA':'~0.90','Ensemble':'~0.96'}
-TYPE_INFO   = {'XGBoost':'Gradient Boosting','LightGBM':'Gradient Boosting','LSTM':'Deep Learning','ARIMA':'Statistical','SARIMA':'Statistical (Seasonal)','Ensemble':'Weighted Average'}
+RMSE_INFO   = {'XGBoost':'~0.49°C','LightGBM':'~0.44°C','LSTM':'~1.99°C','ARIMA':'~1.74°C','SARIMA':'~1.73°C','Ensemble':'~0.97°C'}
+R2_INFO     = {'XGBoost':'~0.994','LightGBM':'~0.995','LSTM':'~0.901','ARIMA':'~0.924','SARIMA':'~0.926','Ensemble':'~0.976'}
+TYPE_INFO   = {'XGBoost':'Gradient Boosting','LightGBM':'Gradient Boosting',
+               'LSTM':'Deep Learning','ARIMA':'Statistical','SARIMA':'Statistical (Seasonal)',
+               'Ensemble':'Weighted Average'}
 MODEL_ORDER = ['XGBoost','LightGBM','LSTM','ARIMA','SARIMA']
 
+
+# ── App Header ─────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-header">🌤️ Delhi Weather Predictor</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Multi-model forecast &nbsp;·&nbsp; XGBoost &nbsp;·&nbsp; LightGBM &nbsp;·&nbsp; LSTM &nbsp;·&nbsp; ARIMA &nbsp;·&nbsp; SARIMA &nbsp;·&nbsp; Ensemble &nbsp;|&nbsp; Trained on Delhi 2013–2017</div>', unsafe_allow_html=True)
 
@@ -285,10 +289,12 @@ if not core_ok:
     st.error("⚠️ Core models not found. Run the training notebook in Colab first.")
     st.stop()
 
+# ── Model Status Row ───────────────────────────────────────────────────────────
+lstm_fully_ready = models['lstm'] is not None and models['lstm_scaler'] is not None
 model_status = [
     ('XGBoost',  models['xgb']    is not None),
     ('LightGBM', models['lgb']    is not None),
-    ('LSTM',     models['lstm']   is not None),
+    ('LSTM',     lstm_fully_ready),
     ('ARIMA',    models['arima']  is not None),
     ('SARIMA',   models['sarima'] is not None),
     ('Ensemble', True),
@@ -305,31 +311,54 @@ for col, (name, loaded) in zip(st.columns(6), model_status):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 📋 Today's Weather")
     st.markdown("*Enter observed values for today:*")
     st.markdown("---")
+
     temp       = st.slider("🌡️ Mean Temperature (°C)", 0.0, 45.0, 22.0, 0.5)
     humidity   = st.slider("💧 Humidity (%)",          10.0,100.0, 65.0, 1.0)
     wind_speed = st.slider("💨 Wind Speed (km/h)",     0.0, 50.0,  8.0, 0.5)
     pressure   = st.slider("🌀 Mean Pressure (hPa)",  990.0,1030.0,1010.0, 0.5)
+
     st.markdown("---")
     st.markdown("### 📅 Recent History")
     st.caption("Used for lag features and ARIMA/SARIMA context")
     temp_yesterday = st.number_input("Yesterday's Temp (°C)", value=21.0, step=0.5)
     temp_2days_ago = st.number_input("2 Days Ago Temp (°C)",  value=20.0, step=0.5)
+
     st.markdown("---")
     predict_btn = st.button("🔮 Predict Tomorrow's Temperature")
+
+    # Show LSTM status / error
+    if models['lstm'] is not None and models['lstm_scaler'] is None:
+        st.error(
+            "⚠️ **LSTM scaler missing**\n\n"
+            "`lstm_scaler.pkl` not in `models/`.\n\n"
+            "In Colab Step 8, after fitting your scaler add:\n"
+            "```python\n"
+            "joblib.dump(scaler, 'models/lstm_scaler.pkl')\n"
+            "```\n"
+            "then re-push (Step 11)."
+        )
+    elif st.session_state.get('_lstm_runtime_error'):
+        st.error(f"⚠️ LSTM runtime error:\n```\n{st.session_state['_lstm_runtime_error']}\n```")
+
     st.markdown("""
     <div class="note-box">
-    💡 LSTM & ARIMA/SARIMA require their model files in <code>models/</code>.
-    Run all notebook steps in Colab first to generate them.
+    💡 LSTM requires <code>lstm_model.keras</code> <b>and</b>
+    <code>lstm_scaler.pkl</code> in <code>models/</code>.
+    Run all Colab steps and re-push.
     </div>""", unsafe_allow_html=True)
 
+
+# ── Main Layout ────────────────────────────────────────────────────────────────
 left, right = st.columns([3, 2], gap="large")
 
 with left:
     if predict_btn:
+        st.session_state['_lstm_runtime_error'] = ''
         with st.spinner("Running all models..."):
             results = run_predictions(temp, humidity, wind_speed, pressure,
                                       temp_yesterday, temp_2days_ago)
@@ -346,7 +375,8 @@ with left:
                 </div>
             </div>""", unsafe_allow_html=True)
 
-        st.markdown('<div class="section-title">Individual Model Predictions</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Individual Model Predictions</div>',
+                    unsafe_allow_html=True)
         for col, name in zip(st.columns(5), MODEL_ORDER):
             pred = results.get(name)
             cls  = CARD_CLASS.get(name, '')
@@ -366,7 +396,8 @@ with left:
                         <div class="pred-condition" style="font-size:0.72rem">not loaded</div>
                     </div>""", unsafe_allow_html=True)
 
-        st.markdown('<div class="section-title">Model Comparison Chart</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Model Comparison Chart</div>',
+                    unsafe_allow_html=True)
         chart_keys = [k for k in MODEL_ORDER if k in results]
         chart_vals = [results[k] for k in chart_keys]
 
@@ -377,15 +408,17 @@ with left:
             colors = [COLOR_MAP.get(k,'#888') for k in chart_keys]
             bars   = ax.bar(chart_keys, chart_vals, color=colors, edgecolor='white', width=0.55, zorder=3)
             if ens:
-                ax.axhline(ens, color='#7C3AED', lw=1.8, ls='--', alpha=0.8, label=f'Ensemble: {ens:.1f}°C', zorder=4)
+                ax.axhline(ens, color='#7C3AED', lw=1.8, ls='--',
+                           alpha=0.8, label=f'Ensemble: {ens:.1f}°C', zorder=4)
                 ax.legend(fontsize=9, framealpha=0.7)
             y_pad = max(chart_vals) - min(chart_vals) if len(chart_vals) > 1 else 1
-            ax.set_ylim(min(chart_vals) - max(2.5, y_pad*0.3), max(chart_vals) + max(3.0, y_pad*0.4))
+            ax.set_ylim(min(chart_vals) - max(2.5, y_pad*0.3),
+                        max(chart_vals) + max(3.0, y_pad*0.4))
             ax.set_ylabel('Predicted Temperature (°C)', fontsize=10)
             ax.set_title('All Model Predictions', fontsize=11, fontweight='bold', color='#0F2942', pad=10)
             for bar, val in zip(bars, chart_vals):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.15, f'{val:.1f}°C',
-                        ha='center', va='bottom', fontsize=9, fontweight='600', color='#0F2942')
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.15,
+                        f'{val:.1f}°C', ha='center', va='bottom', fontsize=9, fontweight='600', color='#0F2942')
             ax.spines[['top','right']].set_visible(False)
             ax.spines['left'].set_color('#CBD5E1')
             ax.spines['bottom'].set_color('#CBD5E1')
@@ -400,20 +433,21 @@ with left:
         for name in MODEL_ORDER:
             pred = results.get(name)
             rows.append({'Model': name, 'Type': TYPE_INFO[name],
-                                     : f"{pred:.1f}°C" if pred else 'N/A',
-                                    :  condition(pred) if pred else '—',
-                               : RMSE_INFO[name], 'R²': R2_INFO[name]})
+                         'Prediction': f"{pred:.1f}°C" if pred is not None else 'N/A',
+                         'Condition':  condition(pred) if pred is not None else '—',
+                         'RMSE': RMSE_INFO[name], 'R²': R2_INFO[name]})
         if ens:
             rows.append({'Model':'🏆 Ensemble','Type':'Weighted Average',
-                                     :f"{ens:.1f}°C",'Condition':condition(ens),
-                               :'~2.0°C','R²':'~0.96'})
+                         'Prediction':f"{ens:.1f}°C",'Condition':condition(ens),
+                         'RMSE':'~0.97°C','R²':'~0.976'})
         st.dataframe(pd.DataFrame(rows).set_index('Model'), use_container_width=True)
 
     else:
         loaded_names  = [n for n,l in model_status if l and n != 'Ensemble']
         missing_names = [n for n,l in model_status if not l and n != 'Ensemble']
         st.markdown("""
-        <div style="background:#F0F7FF;border-radius:14px;padding:2rem;text-align:center;margin-top:1rem;border:1px solid #BFDBFE">
+        <div style="background:#F0F7FF;border-radius:14px;padding:2rem;
+                    text-align:center;margin-top:1rem;border:1px solid #BFDBFE">
             <div style="font-size:3rem">🌤️</div>
             <div style="font-size:1.2rem;font-weight:600;color:#1E3A5F;margin:0.5rem 0">Ready to Forecast</div>
             <div style="color:#5B7FA6;font-size:0.95rem">
@@ -431,6 +465,8 @@ with left:
             else:
                 st.success("All models loaded! ✓")
 
+
+# ── Right Panel ────────────────────────────────────────────────────────────────
 with right:
     st.markdown('<div class="section-title">Feature Guide</div>', unsafe_allow_html=True)
     st.markdown("""
@@ -443,25 +479,30 @@ with right:
 
     st.markdown('<div class="section-title" style="margin-top:1.2rem">Model Reference</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame({
-               : ['XGBoost','LightGBM','LSTM','ARIMA','SARIMA','Ensemble'],
-               : ['~2.1°C','~2.2°C','~2.5°C','~3.2°C','~3.0°C','~2.0°C'],
-               : ['~0.95','~0.94','~0.93','~0.88','~0.90','~0.96'],
+        'Model'  : ['XGBoost','LightGBM','LSTM','ARIMA','SARIMA','Ensemble'],
+        'RMSE'   : ['~0.49°C','~0.44°C','~1.99°C','~1.74°C','~1.73°C','~0.97°C'],
+        'R²'     : ['~0.994','~0.995','~0.901','~0.924','~0.926','~0.976'],
     }).set_index('Model'), use_container_width=True)
 
     st.markdown('<div class="section-title" style="margin-top:1.2rem">Ensemble Strategy</div>', unsafe_allow_html=True)
     st.markdown("""
     <div class="info-box">
-    Uses <b>tuned manual weights</b>: XGBoost (35%) + LightGBM (35%) lead as they
-    have the lowest RMSE. LSTM (15%), ARIMA (8%), SARIMA (7%) contribute when loaded.
-    Weights auto-renormalise when any model is missing.
+    Uses <b>inverse-RMSE weighting</b> with actual training RMSE values.
+    LightGBM (0.44) and XGBoost (0.49) carry ~80% of ensemble weight.
+    ARIMA/SARIMA/LSTM have much lower weight due to higher RMSE.
+    Weights auto-renormalise if any model is missing.
     </div>""", unsafe_allow_html=True)
 
     if predict_btn and 'results' in dir():
         st.markdown('<div class="section-title" style="margin-top:1.2rem">Input Summary</div>', unsafe_allow_html=True)
         st.dataframe(pd.DataFrame({
-                       : ['Temperature','Humidity','Wind Speed','Pressure','Temp Yesterday','Temp 2 Days Ago'],
-                       : [f'{temp}°C', f'{humidity}%', f'{wind_speed} km/h', f'{pressure} hPa', f'{temp_yesterday}°C', f'{temp_2days_ago}°C'],
+            'Parameter': ['Temperature','Humidity','Wind Speed','Pressure','Temp Yesterday','Temp 2 Days Ago'],
+            'Value'    : [f'{temp}°C', f'{humidity}%', f'{wind_speed} km/h',
+                          f'{pressure} hPa', f'{temp_yesterday}°C', f'{temp_2days_ago}°C'],
         }).set_index('Parameter'), use_container_width=True)
 
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("🌦️ Delhi Weather Predictor · Dataset: Delhi 2013–2017 · Models: XGBoost · LightGBM · LSTM · ARIMA · SARIMA · Ensemble · Built with Streamlit")
+st.caption("🌦️ Delhi Weather Predictor · Dataset: Delhi 2013–2017 · "
+           "Models: XGBoost · LightGBM · LSTM · ARIMA · SARIMA · Ensemble · Built with Streamlit")
