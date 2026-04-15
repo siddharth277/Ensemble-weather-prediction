@@ -108,16 +108,7 @@ Make sure all model files are present in `models/` before launching.
 
 ---
 
-## 📊 Model Performance (Delhi 2017 Test Set)
 
-| Model | RMSE | MAE | R² |
-|-------|------|-----|----|
-| XGBoost | ~2.1°C | ~1.5°C | ~0.95 |
-| LightGBM | ~2.2°C | ~1.6°C | ~0.94 |
-| LSTM | ~2.5°C | ~1.8°C | ~0.93 |
-| ARIMA | ~3.2°C | ~2.4°C | ~0.88 |
-| SARIMA | ~3.0°C | ~2.2°C | ~0.90 |
-| **Ensemble** | **~2.0°C** | **~1.4°C** | **~0.96** |
 
 ---
 
