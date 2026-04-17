@@ -156,6 +156,6 @@ shap
 
 **Divyansh Prakash** | GitHub: [@DivyanshPrakashIIT](https://github.com/DivyanshPrakashIIT)
 
-**Siddharth Shukla** | GitHub: Siddharth](https://github.com/siddharth277)
+**Siddharth Shukla** | GitHub: [@Siddharth](https://github.com/siddharth277)
 
 
