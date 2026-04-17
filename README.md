@@ -8,7 +8,7 @@
 ![TensorFlow](https://img.shields.io/badge/TensorFlow-2.x-FF6F00?logo=tensorflow)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.33-red)
 
-----
+-----
 
 ## 📁 Project Structure
 
